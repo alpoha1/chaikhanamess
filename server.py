@@ -54,6 +54,18 @@ def login():
         return {"msg":"ok"}
     return {"msg":"error"},401
 
+@app.route('/update_profile', methods=['POST'])
+def update_profile():
+    d=request.json
+    u=User.query.filter_by(username=d['old']).first()
+
+    if not u:
+        return {"msg":"error"},400
+
+    u.username = d['new']
+    db.session.commit()
+    return {"msg":"ok"}
+
 @app.route('/chats')
 def chats():
     return jsonify([{"name":c.name} for c in Chat.query.all()])
@@ -135,5 +147,4 @@ if __name__=="__main__":
     with app.app_context():
         db.create_all()
 
-    port=int(os.environ.get("PORT",5000))
-    socketio.run(app,host="0.0.0.0",port=port)
+    socketio.run(app,host="0.0.0.0",port=5000)
