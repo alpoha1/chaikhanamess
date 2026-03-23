@@ -1,25 +1,24 @@
 from flask import Flask, request, jsonify, send_file
 from flask_socketio import SocketIO, join_room, send
 from flask_sqlalchemy import SQLAlchemy
-import os, base64
-from datetime import datetime
+import os, base64, time
 
 app = Flask(__name__)
-app.config['SECRET_KEY'] = 'secret!'
-app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///chat.db'
+app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///db.db'
 
 db = SQLAlchemy(app)
-socketio = SocketIO(app, cors_allowed_origins="*", async_mode='eventlet')
+socketio = SocketIO(app, cors_allowed_origins="*")
 
 UPLOAD_FOLDER = "uploads"
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
-# -------- МОДЕЛИ --------
+# -------- БД --------
 
 class User(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     username = db.Column(db.String(50), unique=True)
-    password = db.Column(db.String(100))
+    password = db.Column(db.String(50))
+    avatar = db.Column(db.String(200))
 
 class Chat(db.Model):
     id = db.Column(db.Integer, primary_key=True)
@@ -27,7 +26,7 @@ class Chat(db.Model):
 
 class Message(db.Model):
     id = db.Column(db.Integer, primary_key=True)
-    username = db.Column(db.String(50))
+    user = db.Column(db.String(50))
     chat = db.Column(db.String(50))
     text = db.Column(db.String(500))
 
@@ -35,91 +34,106 @@ class Message(db.Model):
 
 @app.route('/')
 def home():
-    return {"msg": "ok"}
+    return {"msg":"ok"}
 
 @app.route('/register', methods=['POST'])
 def register():
-    data = request.json
-    if User.query.filter_by(username=data['username']).first():
-        return {"msg": "exists"}, 400
+    d=request.json
+    if User.query.filter_by(username=d['username']).first():
+        return {"msg":"exists"},400
 
-    user = User(username=data['username'], password=data['password'])
-    db.session.add(user)
+    db.session.add(User(username=d['username'],password=d['password']))
     db.session.commit()
-    return {"msg": "ok"}
+    return {"msg":"ok"}
 
 @app.route('/login', methods=['POST'])
 def login():
-    data = request.json
-    user = User.query.filter_by(username=data['username'], password=data['password']).first()
-
-    if user:
-        return {"username": user.username}
-    return {"msg": "error"}, 401
+    d=request.json
+    u=User.query.filter_by(username=d['username'],password=d['password']).first()
+    if u:
+        return {"msg":"ok"}
+    return {"msg":"error"},401
 
 @app.route('/chats')
 def chats():
-    chats = Chat.query.all()
-    return jsonify([{"name": c.name} for c in chats])
+    return jsonify([{"name":c.name} for c in Chat.query.all()])
 
 @app.route('/create_chat', methods=['POST'])
 def create_chat():
-    data = request.json
-    chat = Chat(name=data['name'])
-    db.session.add(chat)
+    d=request.json
+    db.session.add(Chat(name=d['name']))
     db.session.commit()
-    return {"msg": "ok"}
+    return {"msg":"ok"}
 
 @app.route('/messages/<chat>')
-def get_messages(chat):
-    msgs = Message.query.filter_by(chat=chat).all()
-    result = []
-
+def messages(chat):
+    msgs=Message.query.filter_by(chat=chat).all()
+    res=[]
     for m in msgs:
         if m.text.startswith("[img]"):
-            result.append({"user": m.username, "image": m.text[5:]})
+            res.append({"user":m.user,"image":m.text[5:]})
         else:
-            result.append({"user": m.username, "text": m.text})
+            res.append({"user":m.user,"text":m.text})
+    return jsonify(res)
 
-    return jsonify(result)
+@app.route('/upload/<f>')
+def upload(f):
+    return send_file(os.path.join(UPLOAD_FOLDER,f))
 
-@app.route('/uploads/<filename>')
-def upload(filename):
-    return send_file(os.path.join(UPLOAD_FOLDER, filename))
+@app.route('/avatar/<username>')
+def avatar(username):
+    u=User.query.filter_by(username=username).first()
+    if u and u.avatar:
+        return send_file(os.path.join(UPLOAD_FOLDER,u.avatar))
+    return {"msg":"no avatar"}
+
+@app.route('/set_avatar', methods=['POST'])
+def set_avatar():
+    d=request.json
+    filename=d['username']+"_avatar.png"
+    path=os.path.join(UPLOAD_FOLDER,filename)
+
+    with open(path,"wb") as f:
+        f.write(base64.b64decode(d['image']))
+
+    u=User.query.filter_by(username=d['username']).first()
+    u.avatar=filename
+    db.session.commit()
+
+    return {"msg":"ok"}
 
 # -------- SOCKET --------
 
 @socketio.on('join')
-def join(data):
-    join_room(data['chat'])
+def join(d):
+    join_room(d['chat'])
 
 @socketio.on('message')
-def msg(data):
-    m = Message(username=data['user'], chat=data['chat'], text=data['text'])
+def msg(d):
+    m=Message(user=d['user'],chat=d['chat'],text=d['text'])
     db.session.add(m)
     db.session.commit()
-
-    send({"user": data['user'], "text": data['text']}, to=data['chat'])
+    send({"user":d['user'],"text":d['text']},to=d['chat'])
 
 @socketio.on('image')
-def img(data):
-    filename = f"{datetime.now().timestamp()}.png"
-    path = os.path.join(UPLOAD_FOLDER, filename)
+def img(d):
+    name=str(time.time())+".png"
+    path=os.path.join(UPLOAD_FOLDER,name)
 
-    with open(path, "wb") as f:
-        f.write(base64.b64decode(data['image']))
+    with open(path,"wb") as f:
+        f.write(base64.b64decode(d['image']))
 
-    m = Message(username=data['user'], chat=data['chat'], text=f"[img]{filename}")
+    m=Message(user=d['user'],chat=d['chat'],text="[img]"+name)
     db.session.add(m)
     db.session.commit()
 
-    send({"user": data['user'], "image": filename}, to=data['chat'])
+    send({"user":d['user'],"image":name},to=d['chat'])
 
 # -------- ЗАПУСК --------
 
-if __name__ == "__main__":
+if __name__=="__main__":
     with app.app_context():
         db.create_all()
 
-    port = int(os.environ.get("PORT", 5000))
-    socketio.run(app, host="0.0.0.0", port=port)
+    port=int(os.environ.get("PORT",5000))
+    socketio.run(app,host="0.0.0.0",port=port)
