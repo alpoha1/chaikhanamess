@@ -1,6 +1,6 @@
-flask
-flask-socketio
-eventlet
-flask_sqlalchemy
-flask_jwt_extended
-pillow
+Flask==2.2.5
+Flask-SocketIO==5.3.2
+python-socketio==5.7.2
+python-engineio==4.4.0
+eventlet==0.33.0
+gunicorn==20.1.0
