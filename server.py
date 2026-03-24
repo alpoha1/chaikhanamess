@@ -1,197 +1,179 @@
-import os
-import uuid
-import base64
-import sqlite3
-from flask import Flask, request, jsonify, send_file
-from flask_socketio import SocketIO, emit, join_room
+from flask import Flask, request, jsonify, send_from_directory
+from flask_cors import CORS
+from flask_socketio import SocketIO, emit
+import json, os
+from werkzeug.utils import secure_filename
 
 app = Flask(__name__)
+CORS(app)
 socketio = SocketIO(app, cors_allowed_origins="*")
 
-DB = "database.db"
+UPLOAD_FOLDER = "uploads"
+os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
-def db():
-    return sqlite3.connect(DB, check_same_thread=False)
+USERS_FILE = "users.json"
+CHATS_FILE = "chats.json"
 
-# Создание таблиц
-with db() as con:
-    con.execute("""
-    CREATE TABLE IF NOT EXISTS users (
-        login TEXT PRIMARY KEY,
-        nick TEXT,
-        avatar TEXT,
-        muted INTEGER DEFAULT 0
-    )
-    """)
-    con.execute("""
-    CREATE TABLE IF NOT EXISTS messages (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        chat_id TEXT,
-        sender TEXT,
-        type TEXT,
-        text TEXT,
-        file_url TEXT,
-        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
-    )
-    """)
-    con.execute("""
-    CREATE TABLE IF NOT EXISTS chats (
-        id TEXT PRIMARY KEY,
-        name TEXT,
-        avatar TEXT,
-        is_group INTEGER
-    )
-    """)
-    con.execute("""
-    CREATE TABLE IF NOT EXISTS chat_members (
-        chat_id TEXT,
-        login TEXT
-    )
-    """)
+def load(file):
+    if not os.path.exists(file):
+        return {}
+    with open(file, "r") as f:
+        return json.load(f)
 
-# Создаём группу "чайхана"
-with db() as con:
-    con.execute("""
-    INSERT OR IGNORE INTO chats(id, name, avatar, is_group)
-    VALUES ('chaihana', 'чайхана', 'https://i.imgur.com/8fKQZQp.jpeg', 1)
-    """)
+def save(file, data):
+    with open(file, "w") as f:
+        json.dump(data, f)
 
-ADMIN_LOGIN = "sedr"
-ADMIN_PASS = "evrey"
+# --- INIT ---
+def init():
+    chats = load(CHATS_FILE)
+    if "chayhana" not in chats:
+        chats["chayhana"] = {
+            "name": "Чайхана",
+            "users": [],
+            "messages": []
+        }
+        save(CHATS_FILE, chats)
 
+init()
+
+# --- AUTH ---
 @app.route("/register", methods=["POST"])
 def register():
     data = request.json
-    login = data["login"]
-    password = data["password"]
-    nick = data["nick"]
-    avatar = data.get("avatar", "")
+    users = load(USERS_FILE)
+    chats = load(CHATS_FILE)
 
-    if login == ADMIN_LOGIN and password != ADMIN_PASS:
-        return jsonify({"ok": False, "error": "wrong admin password"})
+    if data["login"] in users:
+        return jsonify({"error": "exists"})
 
-    with db() as con:
-        con.execute("INSERT OR IGNORE INTO users(login, nick, avatar) VALUES (?,?,?)",
-                    (login, nick, avatar))
-        con.execute("INSERT OR IGNORE INTO chat_members(chat_id, login) VALUES ('chaihana',?)",
-                    (login,))
+    users[data["login"]] = {
+        "password": data["password"],
+        "nickname": data["login"],
+        "avatar": "",
+        "muted": False
+    }
 
-    return jsonify({"ok": True, "user": {"login": login, "nick": nick, "avatar": avatar}})
+    chats["chayhana"]["users"].append(data["login"])
 
-@socketio.on("connect")
-def on_connect():
-    emit("connected", {"ok": True})
+    save(USERS_FILE, users)
+    save(CHATS_FILE, chats)
+    return jsonify({"status": "ok"})
 
-@socketio.on("load_chats")
-def load_chats(data):
-    login = data["login"]
+@app.route("/login", methods=["POST"])
+def login():
+    data = request.json
+    users = load(USERS_FILE)
 
-    with db() as con:
-        rows = con.execute("""
-            SELECT chats.id, chats.name, chats.avatar, chats.is_group
-            FROM chats
-            JOIN chat_members ON chats.id = chat_members.chat_id
-            WHERE chat_members.login=?
-        """, (login,)).fetchall()
+    user = users.get(data["login"])
+    if not user or user["password"] != data["password"]:
+        return jsonify({"error": "wrong"})
 
-    chats = []
-    for cid, name, avatar, is_group in rows:
-        chats.append({"id": cid, "name": name, "avatar": avatar, "is_group": is_group})
+    return jsonify(user)
 
-    emit("chats", chats)
+# --- USERS ---
+@app.route("/users")
+def users_list():
+    return jsonify(load(USERS_FILE))
 
-@socketio.on("load_history")
-def load_history(data):
-    chat_id = data["chat_id"]
+# --- PROFILE ---
+@app.route("/profile", methods=["POST"])
+def profile():
+    data = request.json
+    users = load(USERS_FILE)
 
-    with db() as con:
-        rows = con.execute("""
-            SELECT sender, type, text, file_url
-            FROM messages
-            WHERE chat_id=?
-            ORDER BY id ASC
-        """, (chat_id,)).fetchall()
+    users[data["login"]]["nickname"] = data["nickname"]
+    users[data["login"]]["avatar"] = data["avatar"]
 
-    history = []
-    for sender, type_, text, file_url in rows:
-        history.append({
-            "type": type_,
-            "nick": sender,
-            "text": text,
-            "url": file_url
-        })
+    save(USERS_FILE, users)
+    return jsonify({"status": "ok"})
 
-    emit("history", history)
+# --- CHATS ---
+@app.route("/chats/<login>")
+def chats(login):
+    chats = load(CHATS_FILE)
+    result = []
 
-@socketio.on("send")
-def send_msg(data):
-    chat_id = data["chat_id"]
-    sender = data["from"]
-    text = data["text"]
+    for cid, c in chats.items():
+        if login in c["users"]:
+            result.append({
+                "id": cid,
+                "name": c["name"],
+                "count": len(c["users"])
+            })
 
-    with db() as con:
-        muted = con.execute("SELECT muted FROM users WHERE login=?", (sender,)).fetchone()
-        if muted and muted[0] == 1:
-            return
+    return jsonify(result)
 
-        con.execute("""
-            INSERT INTO messages(chat_id, sender, type, text)
-            VALUES (?,?,?,?)
-        """, (chat_id, sender, "text", text))
+@app.route("/create_private", methods=["POST"])
+def create_private():
+    data = request.json
+    chats = load(CHATS_FILE)
 
-    msg = {"type": "text", "nick": sender, "text": text}
-    emit("message", msg, room=chat_id)
+    cid = f"dm_{data['user1']}_{data['user2']}"
 
-@socketio.on("join_chat")
-def join_chat(data):
-    chat_id = data["chat_id"]
-    join_room(chat_id)
+    if cid not in chats:
+        chats[cid] = {
+            "name": f"{data['user2']}",
+            "users": [data["user1"], data["user2"]],
+            "messages": []
+        }
 
-@socketio.on("file")
-def on_file(data):
-    chat_id = data["chat_id"]
-    name = data["name"]
-    b64 = data["data"]
-    # Добавь поле отправителя в emit с фронтенда или вытащи из данных
-    sender = data.get("from", "System") 
+    save(CHATS_FILE, chats)
+    return jsonify({"id": cid})
 
-    raw = base64.b64decode(b64)
-    os.makedirs("uploads", exist_ok=True)
+# --- FILE ---
+@app.route("/upload", methods=["POST"])
+def upload():
+    file = request.files["file"]
+    name = secure_filename(file.filename)
 
-    filename = f"{uuid.uuid4().hex}_{name}"
-    path = f"uploads/{filename}"
+    path = os.path.join(UPLOAD_FOLDER, name)
+    file.save(path)
 
-    with open(path, "wb") as f:
-        f.write(raw)
+    return jsonify({"url": "/file/" + name})
 
-    # На некоторых хостингах (типа Render) лучше использовать прямую ссылку
-    url = f"{request.host_url}file/{filename}"
+@app.route("/file/<name>")
+def file(name):
+    return send_from_directory(UPLOAD_FOLDER, name)
 
-    with db() as con:
-        con.execute("""
-            INSERT INTO messages(chat_id, sender, type, file_url)
-            VALUES (?,?,?,?)
-        """, (chat_id, sender, "file", url))
+# --- MESSAGES ---
+@app.route("/messages/<chat>")
+def messages(chat):
+    return jsonify(load(CHATS_FILE)[chat]["messages"])
 
-    msg = {"type": "file", "url": url, "nick": sender} # Добавляем nick
-    emit("message", msg, room=chat_id)
+@socketio.on("send_message")
+def send_message(data):
+    chats = load(CHATS_FILE)
+    users = load(USERS_FILE)
 
-@app.route("/file/<fname>")
-def serve_file(fname):
-    return send_file(os.path.join("uploads", fname))
-
-@socketio.on("mute")
-def mute_user(data):
-    admin = data["admin"]
-    target = data["target"]
-
-    if admin != ADMIN_LOGIN:
+    if users[data["login"]]["muted"]:
         return
 
-    with db() as con:
-        con.execute("UPDATE users SET muted=1 WHERE login=?", (target,))
+    msg = {
+        "user": data["login"],
+        "text": data.get("text", ""),
+        "file": data.get("file", ""),
+        "type": data.get("type", "text")
+    }
 
-    emit("message", {"type": "text", "text": f"{target} был заглушён"}, broadcast=True)
+    chats[data["chat"]]["messages"].append(msg)
+    save(CHATS_FILE, chats)
+
+    emit("receive_message", msg, broadcast=True)
+
+# --- MUTE ---
+@app.route("/mute", methods=["POST"])
+def mute():
+    data = request.json
+    users = load(USERS_FILE)
+
+    if data["admin"] != "sedr":
+        return jsonify({"error": "no access"})
+
+    users[data["target"]]["muted"] = data["mute"]
+    save(USERS_FILE, users)
+
+    return jsonify({"status": "ok"})
 
 if __name__ == "__main__":
     socketio.run(app, host="0.0.0.0", port=5000)
