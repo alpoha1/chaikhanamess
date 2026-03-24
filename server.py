@@ -152,7 +152,8 @@ def on_file(data):
     chat_id = data["chat_id"]
     name = data["name"]
     b64 = data["data"]
-    mime = data["mime"]
+    # Добавь поле отправителя в emit с фронтенда или вытащи из данных
+    sender = data.get("from", "System") 
 
     raw = base64.b64decode(b64)
     os.makedirs("uploads", exist_ok=True)
@@ -163,15 +164,16 @@ def on_file(data):
     with open(path, "wb") as f:
         f.write(raw)
 
-    url = request.host_url + "file/" + filename
+    # На некоторых хостингах (типа Render) лучше использовать прямую ссылку
+    url = f"{request.host_url}file/{filename}"
 
     with db() as con:
         con.execute("""
             INSERT INTO messages(chat_id, sender, type, file_url)
             VALUES (?,?,?,?)
-        """, (chat_id, "file", "file", url))
+        """, (chat_id, sender, "file", url))
 
-    msg = {"type": "file", "url": url}
+    msg = {"type": "file", "url": url, "nick": sender} # Добавляем nick
     emit("message", msg, room=chat_id)
 
 @app.route("/file/<fname>")
