@@ -45,7 +45,7 @@ def close_db(_error):
 
 
 def now_iso():
-    return dt.datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
+    return dt.datetime.now(dt.UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
 def token_for_user(user_id):
@@ -83,6 +83,7 @@ def auth_required(handler):
 
 def init_db():
     db = sqlite3.connect(DATABASE_PATH)
+    db.row_factory = sqlite3.Row
     db.executescript(
         """
         CREATE TABLE IF NOT EXISTS users (
