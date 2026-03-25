@@ -4,7 +4,7 @@
 В этом мессенджере нету всего что только не придумаешь
 
 ## Установка
-В разделе [Releases](https://example.com)
+В разделе [Releases](https://github.com/alpoha1/chaikhanamess/releases/tag/release)
 
 Функционал
 - Отправка сообщений с задержкой в 1000мс
