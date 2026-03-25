@@ -304,6 +304,17 @@ def health():
     return jsonify({"ok": True, "time": now_iso()})
 
 
+@app.route("/")
+def index():
+    return jsonify(
+        {
+            "ok": True,
+            "service": "chaikhana-messenger",
+            "health": "/health",
+        }
+    )
+
+
 @app.route("/uploads/<path:filename>")
 def uploaded_file(filename):
     return send_from_directory(UPLOADS_DIR, filename)
@@ -621,6 +632,7 @@ def mute():
 if __name__ == "__main__":
     init_db()
     port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port, debug=True)
+    debug = os.environ.get("FLASK_DEBUG", "").lower() in {"1", "true", "yes"}
+    app.run(host="0.0.0.0", port=port, debug=debug)
 else:
     init_db()
