@@ -1,9 +1,11 @@
 import datetime as dt
+import json
 import os
 import sqlite3
 import uuid
 from functools import wraps
 from pathlib import Path
+from urllib import request as urllib_request
 
 from flask import Flask, g, jsonify, request, send_from_directory
 from flask_cors import CORS
@@ -19,7 +21,7 @@ SECRET_PREFIX = "teahouse-token"
 ADMIN_LOGIN = os.environ.get("ADMIN_LOGIN", "").strip().lower()
 ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "").strip()
 ADMIN_NICKNAME = os.environ.get("ADMIN_NICKNAME", "Admin").strip() or "Admin"
-GENERAL_CHAT_NAME = "Чайхана"
+GENERAL_CHAT_NAME = "Р§Р°Р№С…Р°РЅР°"
 GENERAL_CHAT_AVATAR = (
     "https://i.imgur.com/1BIpgEK.jpeg"
 )
@@ -79,12 +81,12 @@ def auth_required(handler):
         token = header.replace("Bearer ", "").strip()
         user_id = parse_token(token)
         if not user_id:
-            return jsonify({"error": "Нужна авторизация"}), 401
+            return jsonify({"error": "РќСѓР¶РЅР° Р°РІС‚РѕСЂРёР·Р°С†РёСЏ"}), 401
 
         db = get_db()
         user = db.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
         if not user:
-            return jsonify({"error": "Пользователь не найден"}), 401
+            return jsonify({"error": "РџРѕР»СЊР·РѕРІР°С‚РµР»СЊ РЅРµ РЅР°Р№РґРµРЅ"}), 401
 
         g.current_user = user
         return handler(*args, **kwargs)
@@ -141,6 +143,13 @@ def init_db():
             user_b INTEGER NOT NULL,
             chat_id INTEGER NOT NULL,
             UNIQUE(user_a, user_b)
+        );
+
+        CREATE TABLE IF NOT EXISTS push_tokens (
+            token TEXT PRIMARY KEY,
+            user_id INTEGER NOT NULL,
+            platform TEXT,
+            updated_at TEXT NOT NULL
         );
         """
     )
@@ -316,6 +325,79 @@ def serialize_message(row, db):
     }
 
 
+def get_push_tokens_for_chat(db, chat_id, sender_id):
+    rows = db.execute(
+        """
+        SELECT DISTINCT pt.token
+        FROM push_tokens pt
+        JOIN chat_members cm ON cm.user_id = pt.user_id
+        WHERE cm.chat_id = ? AND pt.user_id != ?
+        """,
+        (chat_id, sender_id),
+    ).fetchall()
+    return [row["token"] for row in rows]
+
+
+def send_push_notifications(tokens, title, body, data=None):
+    if not tokens:
+        return
+
+    messages = [
+        {
+            "to": token,
+            "sound": "default",
+            "title": title,
+            "body": body,
+            "data": data or {},
+        }
+        for token in tokens
+    ]
+
+    req = urllib_request.Request(
+        "https://exp.host/--/api/v2/push/send",
+        data=json.dumps(messages).encode("utf-8"),
+        headers={
+            "Accept": "application/json",
+            "Accept-encoding": "gzip, deflate",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    try:
+        with urllib_request.urlopen(req, timeout=10):
+            pass
+    except Exception:
+        # Push delivery failures should not break the main API flow.
+        pass
+
+
+def notify_chat_members(db, chat_id, sender_id, message_row):
+    tokens = get_push_tokens_for_chat(db, chat_id, sender_id)
+    if not tokens:
+        return
+
+    chat = db.execute("SELECT title, is_group FROM chats WHERE id = ?", (chat_id,)).fetchone()
+    sender = db.execute("SELECT nickname FROM users WHERE id = ?", (sender_id,)).fetchone()
+    sender_name = sender["nickname"] if sender else "Someone"
+    chat_title = chat["title"] if chat else "New message"
+    msg_type = message_row["type"]
+    text = (message_row["text"] or "").strip()
+
+    if text:
+        body = text
+    elif msg_type == "image":
+        body = f"{sender_name}: photo"
+    elif msg_type == "video":
+        body = f"{sender_name}: video"
+    elif msg_type == "file":
+        body = f"{sender_name}: file"
+    else:
+        body = f"{sender_name}: new message"
+
+    title = chat_title if chat and chat["is_group"] else sender_name
+    send_push_notifications(tokens, title, body, {"chatId": chat_id})
+
+
 @app.route("/health")
 def health():
     return jsonify({"ok": True, "time": now_iso()})
@@ -346,11 +428,11 @@ def register():
     nickname = payload.get("nickname", "").strip()
 
     if not login or not password or not nickname:
-        return jsonify({"error": "Нужны логин, пароль и ник"}), 400
+        return jsonify({"error": "РќСѓР¶РЅС‹ Р»РѕРіРёРЅ, РїР°СЂРѕР»СЊ Рё РЅРёРє"}), 400
 
     exists = db.execute("SELECT id FROM users WHERE login = ?", (login,)).fetchone()
     if exists:
-        return jsonify({"error": "Такой логин уже занят"}), 400
+        return jsonify({"error": "РўР°РєРѕР№ Р»РѕРіРёРЅ СѓР¶Рµ Р·Р°РЅСЏС‚"}), 400
 
     db.execute(
         """
@@ -375,7 +457,7 @@ def login():
     user = db.execute("SELECT * FROM users WHERE login = ?", (login_value,)).fetchone()
 
     if not user or not check_password_hash(user["password_hash"], password):
-        return jsonify({"error": "Неверный логин или пароль"}), 401
+        return jsonify({"error": "РќРµРІРµСЂРЅС‹Р№ Р»РѕРіРёРЅ РёР»Рё РїР°СЂРѕР»СЊ"}), 401
 
     ensure_general_membership(db, user["id"])
     return jsonify({"token": token_for_user(user["id"]), "user": row_to_user(user)})
@@ -390,7 +472,7 @@ def update_profile():
     avatar_url = payload.get("avatar_url")
 
     if not nickname:
-        return jsonify({"error": "Никнейм не может быть пустым"}), 400
+        return jsonify({"error": "РќРёРєРЅРµР№Рј РЅРµ РјРѕР¶РµС‚ Р±С‹С‚СЊ РїСѓСЃС‚С‹Рј"}), 400
 
     db.execute(
         "UPDATE users SET nickname = ?, avatar_url = ? WHERE id = ?",
@@ -399,6 +481,32 @@ def update_profile():
     db.commit()
     user = db.execute("SELECT * FROM users WHERE id = ?", (g.current_user["id"],)).fetchone()
     return jsonify({"user": row_to_user(user)})
+
+
+@app.route("/push-token", methods=["PUT"])
+@auth_required
+def register_push_token():
+    db = get_db()
+    payload = request.get_json(force=True)
+    token = str(payload.get("token", "")).strip()
+    platform = str(payload.get("platform", "")).strip()
+
+    if not token:
+        return jsonify({"error": "Token is required"}), 400
+
+    db.execute(
+        """
+        INSERT INTO push_tokens (token, user_id, platform, updated_at)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(token) DO UPDATE SET
+            user_id = excluded.user_id,
+            platform = excluded.platform,
+            updated_at = excluded.updated_at
+        """,
+        (token, g.current_user["id"], platform, now_iso()),
+    )
+    db.commit()
+    return jsonify({"ok": True})
 
 
 @app.route("/users", methods=["GET"])
@@ -444,7 +552,7 @@ def direct_chat():
     current_user_id = int(g.current_user["id"])
 
     if other_user_id == current_user_id:
-        return jsonify({"error": "Нельзя создать диалог с собой"}), 400
+        return jsonify({"error": "РќРµР»СЊР·СЏ СЃРѕР·РґР°С‚СЊ РґРёР°Р»РѕРі СЃ СЃРѕР±РѕР№"}), 400
 
     ordered = tuple(sorted([current_user_id, other_user_id]))
     pair = db.execute(
@@ -458,7 +566,7 @@ def direct_chat():
 
     other_user = db.execute("SELECT * FROM users WHERE id = ?", (other_user_id,)).fetchone()
     if not other_user:
-        return jsonify({"error": "Пользователь не найден"}), 404
+        return jsonify({"error": "РџРѕР»СЊР·РѕРІР°С‚РµР»СЊ РЅРµ РЅР°Р№РґРµРЅ"}), 404
 
     db.execute(
         """
@@ -494,9 +602,9 @@ def ensure_can_send(db, chat_id, user_id):
         (chat_id, user_id),
     ).fetchone()
     if not member:
-        return False, ("Нет доступа к чату", 403)
+        return False, ("РќРµС‚ РґРѕСЃС‚СѓРїР° Рє С‡Р°С‚Сѓ", 403)
     if member["muted"]:
-        return False, ("Вы заглушены администратором", 403)
+        return False, ("Р’С‹ Р·Р°РіР»СѓС€РµРЅС‹ Р°РґРјРёРЅРёСЃС‚СЂР°С‚РѕСЂРѕРј", 403)
     return True, None
 
 
@@ -531,7 +639,7 @@ def get_messages(chat_id):
         (chat_id, g.current_user["id"]),
     ).fetchone()
     if not member:
-        return jsonify({"error": "Нет доступа к этому чату"}), 403
+        return jsonify({"error": "РќРµС‚ РґРѕСЃС‚СѓРїР° Рє СЌС‚РѕРјСѓ С‡Р°С‚Сѓ"}), 403
 
     chat = db.execute("SELECT * FROM chats WHERE id = ?", (chat_id,)).fetchone()
     rows = db.execute(
@@ -561,9 +669,10 @@ def post_message(chat_id):
     payload = request.get_json(force=True)
     text = payload.get("text", "").strip()
     if not text:
-        return jsonify({"error": "Сообщение пустое"}), 400
+        return jsonify({"error": "РЎРѕРѕР±С‰РµРЅРёРµ РїСѓСЃС‚РѕРµ"}), 400
 
     message = add_message(db, chat_id, g.current_user["id"], text=text)
+    notify_chat_members(db, chat_id, g.current_user["id"], message)
     return jsonify({"message": serialize_message(message, db)})
 
 
@@ -579,7 +688,7 @@ def upload(chat_id):
 
     file = request.files.get("file")
     if not file:
-        return jsonify({"error": "Файл не найден"}), 400
+        return jsonify({"error": "Р¤Р°Р№Р» РЅРµ РЅР°Р№РґРµРЅ"}), 400
 
     original_name = secure_filename(file.filename or f"file-{uuid.uuid4().hex}")
     extension = Path(original_name).suffix
@@ -609,6 +718,7 @@ def upload(chat_id):
         file_name=original_name,
         mime_type=mime_type,
     )
+    notify_chat_members(db, chat_id, g.current_user["id"], message)
     return jsonify(
         {
             "message": serialize_message(message, db),
@@ -623,7 +733,7 @@ def upload(chat_id):
 def mute():
     db = get_db()
     if not g.current_user["is_admin"]:
-        return jsonify({"error": "Только админ может заглушать"}), 403
+        return jsonify({"error": "РўРѕР»СЊРєРѕ Р°РґРјРёРЅ РјРѕР¶РµС‚ Р·Р°РіР»СѓС€Р°С‚СЊ"}), 403
 
     payload = request.get_json(force=True)
     try:
@@ -635,15 +745,15 @@ def mute():
 
     general_chat_id = get_general_chat_id(db)
     if chat_id != general_chat_id:
-        return jsonify({"error": "Мут доступен только в общем чате"}), 400
+        return jsonify({"error": "РњСѓС‚ РґРѕСЃС‚СѓРїРµРЅ С‚РѕР»СЊРєРѕ РІ РѕР±С‰РµРј С‡Р°С‚Рµ"}), 400
     if user_id == g.current_user["id"]:
-        return jsonify({"error": "Нельзя заглушить себя"}), 400
+        return jsonify({"error": "РќРµР»СЊР·СЏ Р·Р°РіР»СѓС€РёС‚СЊ СЃРµР±СЏ"}), 400
 
     db.execute(
         "UPDATE chat_members SET muted = ?, mute_reason = ? WHERE chat_id = ? AND user_id = ?",
         (
             muted,
-            "Вам временно запрещено писать в общем чате." if muted else "",
+            "Р’Р°Рј РІСЂРµРјРµРЅРЅРѕ Р·Р°РїСЂРµС‰РµРЅРѕ РїРёСЃР°С‚СЊ РІ РѕР±С‰РµРј С‡Р°С‚Рµ." if muted else "",
             chat_id,
             user_id,
         ),
@@ -659,3 +769,4 @@ if __name__ == "__main__":
     app.run(host="0.0.0.0", port=port, debug=debug)
 else:
     init_db()
+
